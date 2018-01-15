@@ -12,22 +12,19 @@
  any redistribution
 *********************************************************************/
 
-/*
-  This example shows how to send HID (keyboard/mouse/etc) data via BLE
-  Note that not all devices support BLE keyboard! BLE Keyboard != Bluetooth Keyboard
-*/
-
+#include <string.h>
 #include <Arduino.h>
 #include <SPI.h>
+#include <Adafruit_NeoPixel.h>
 #include "Adafruit_BLE.h"
 #include "Adafruit_BluefruitLE_SPI.h"
 #include "Adafruit_BluefruitLE_UART.h"
-
-#include "BluefruitConfig.h"
-
 #if SOFTWARE_SERIAL_AVAILABLE
   #include <SoftwareSerial.h>
 #endif
+
+#include "BluefruitConfig.h"
+
 
 /*=========================================================================
     APPLICATION SETTINGS
@@ -55,12 +52,16 @@
                               since the factory reset will clear all of the
                               bonding data stored on the chip, meaning the
                               central device won't be able to reconnect.
-    MINIMUM_FIRMWARE_VERSION  Minimum firmware version to have some new features
+    PIN                       Which pin on the Arduino is connected to the NeoPixels?
+    NUMPIXELS                 How many NeoPixels are attached to the Arduino?
     -----------------------------------------------------------------------*/
-    #define FACTORYRESET_ENABLE         0
-    #define MINIMUM_FIRMWARE_VERSION    "0.6.6"
+    #define FACTORYRESET_ENABLE     1
+
+    #define PIN                     5
+    #define NUMPIXELS               1
 /*=========================================================================*/
 
+Adafruit_NeoPixel pixel = Adafruit_NeoPixel(NUMPIXELS, PIN);
 
 // Create the bluefruit object, either software serial...uncomment these lines
 /*
@@ -81,11 +82,21 @@ Adafruit_BluefruitLE_SPI ble(BLUEFRUIT_SPI_CS, BLUEFRUIT_SPI_IRQ, BLUEFRUIT_SPI_
 //                             BLUEFRUIT_SPI_MOSI, BLUEFRUIT_SPI_CS,
 //                             BLUEFRUIT_SPI_IRQ, BLUEFRUIT_SPI_RST);
 
+
 // A small helper
 void error(const __FlashStringHelper*err) {
   Serial.println(err);
   while (1);
 }
+
+// function prototypes over in packetparser.cpp
+uint8_t readPacket(Adafruit_BLE *ble, uint16_t timeout);
+float parsefloat(uint8_t *buffer);
+void printHex(const uint8_t * data, const uint32_t numBytes);
+
+// the packet buffer
+extern uint8_t packetbuffer[];
+
 
 /**************************************************************************/
 /*!
@@ -98,9 +109,16 @@ void setup(void)
   while (!Serial);  // required for Flora & Micro
   delay(500);
 
+  // turn off neopixel
+  pixel.begin(); // This initializes the NeoPixel library.
+  for(uint8_t i=0; i<NUMPIXELS; i++) {
+    pixel.setPixelColor(i, pixel.Color(0,0,0)); // off
+  }
+  pixel.show();
+
   Serial.begin(115200);
-  Serial.println(F("Adafruit Bluefruit HID Keyboard Example"));
-  Serial.println(F("---------------------------------------"));
+  Serial.println(F("Adafruit Bluefruit Neopixel Color Picker Example"));
+  Serial.println(F("------------------------------------------------"));
 
   /* Initialise the module */
   Serial.print(F("Initialising the Bluefruit LE module: "));
@@ -127,50 +145,24 @@ void setup(void)
   /* Print Bluefruit information */
   ble.info();
 
-  /* Change the device name to make it easier to find */
-  Serial.println(F("Setting device name to 'Bluefruit Keyboard': "));
-  if (! ble.sendCommandCheckOK(F( "AT+GAPDEVNAME=Bluefruit Keyboard" )) ) {
-    error(F("Could not set device name?"));
-  }
-
-  /* Enable HID Service */
-  Serial.println(F("Enable HID Service (including Keyboard): "));
-  if ( ble.isVersionAtLeast(MINIMUM_FIRMWARE_VERSION) )
-  {
-    if ( !ble.sendCommandCheckOK(F( "AT+BleHIDEn=On" ))) {
-      error(F("Could not enable Keyboard"));
-    }
-  }else
-  {
-    if (! ble.sendCommandCheckOK(F( "AT+BleKeyboardEn=On"  ))) {
-      error(F("Could not enable Keyboard"));
-    }
-  }
-
-  /* Add or remove service requires a reset */
-  Serial.println(F("Performing a SW reset (service changes require a reset): "));
-  if (! ble.reset() ) {
-    error(F("Couldn't reset??"));
-  }
-
-  Serial.println();
-  Serial.println(F("Go to your phone's Bluetooth settings to pair your device"));
-  Serial.println(F("then open an application that accepts keyboard input"));
-
-  Serial.println();
-  Serial.println(F("Enter the character(s) to send:"));
-  Serial.println(F("- \\r for Enter"));
-  Serial.println(F("- \\n for newline"));
-  Serial.println(F("- \\t for tab"));
-  Serial.println(F("- \\b for backspace"));
-
+  Serial.println(F("Please use Adafruit Bluefruit LE app to connect in Controller mode"));
+  Serial.println(F("Then activate/use the sensors, color picker, game controller, etc!"));
   Serial.println();
 
-  pinMode(9, INPUT_PULLUP);
-  pinMode(10, INPUT_PULLUP);
-  pinMode(11, INPUT_PULLUP);
-  pinMode(12, INPUT_PULLUP);
-  pinMode(13, INPUT_PULLUP);
+  ble.verbose(false);  // debug info is a little annoying after this point!
+
+  /* Wait for connection */
+  while (! ble.isConnected()) {
+      delay(500);
+  }
+
+  Serial.println(F("***********************"));
+
+  // Set Bluefruit to DATA mode
+  Serial.println( F("Switching to DATA mode!") );
+  ble.setMode(BLUEFRUIT_MODE_DATA);
+
+  Serial.println(F("***********************"));
 
 }
 
@@ -181,82 +173,30 @@ void setup(void)
 /**************************************************************************/
 void loop(void)
 {
-  for (int pin = 0; pin < 4; pin++)
-  {
-    int swt = digitalRead(pin + 10);
-    if (swt == 0)
-    {
-      char *bleCode;
-      switch (pin)
-      {
-        case 0: 
-          bleCode = "00-00-50-00"; // left
-          break;
-        case 1: 
-          bleCode = "00-00-4F-00"; // rigth
-          break;
-        case 2:
-          bleCode = "00-00-51-00"; // down
-          break;
-        case 3:
-          bleCode = "00-00-52-00"; // up
-          break;
-      }
+  /* Wait for new data to arrive */
+  uint8_t len = readPacket(&ble, BLE_READPACKET_TIMEOUT);
+  if (len == 0) return;
 
-      if (strlen(bleCode) > 1)
-      {
-        sendTo32u4(bleCode);
-      }
+  /* Got a packet! */
+  // printHex(packetbuffer, len);
+
+  // Color
+  if (packetbuffer[1] == 'C') {
+    uint8_t red = packetbuffer[2];
+    uint8_t green = packetbuffer[3];
+    uint8_t blue = packetbuffer[4];
+    Serial.print ("RGB #");
+    if (red < 0x10) Serial.print("0");
+    Serial.print(red, HEX);
+    if (green < 0x10) Serial.print("0");
+    Serial.print(green, HEX);
+    if (blue < 0x10) Serial.print("0");
+    Serial.println(blue, HEX);
+
+    for(uint8_t i=0; i<NUMPIXELS; i++) {
+      pixel.setPixelColor(i, pixel.Color(red,green,blue));
     }
+    pixel.show(); // This sends the updated pixel color to the hardware.
   }
 
-  int btn1 = digitalRead(9);
-  // Serial.println(btn1);
-  if (btn1 == 0)
-  {
-    sendTo32u4("00-00-14-00");
-  }
-  
-  delay(150);
-}
-
-void sendTo32u4(char *bleCode)
-{
-    // ble.print("AT+BleKeyboard=");
-    // ble.println(49);
-    // https://learn.adafruit.com/introducing-adafruit-ble-bluetooth-low-energy-friend/ble-services
-    ble.print("AT+BLEKEYBOARDCODE=");
-    ble.println(bleCode);
-
-    ble.print("AT+BLEKEYBOARDCODE=");
-    ble.println("00-00");
-
-    if( ble.waitForOK() )
-    {
-      Serial.println( F("OK!") );
-    }else
-    {
-      Serial.println( F("FAILED!") );
-    }
-}
-
-/**************************************************************************/
-/*!
-    @brief  Checks for user input (via the Serial Monitor)
-*/
-/**************************************************************************/
-void getUserInput(char buffer[], uint8_t maxSize)
-{
-  memset(buffer, 0, maxSize);
-  while( Serial.available() == 0 ) {
-    delay(1);
-  }
-
-  uint8_t count=0;
-
-  do
-  {
-    count += Serial.readBytes(buffer+count, maxSize);
-    delay(2);
-  } while( (count < maxSize) && !(Serial.available() == 0) );
 }
